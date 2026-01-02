@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import WalletClient from '@bsv/sdk/wallet/WalletClient'
 import PublicKey from '@bsv/sdk/primitives/PublicKey'
 import P2PKH from '@bsv/sdk/script/templates/P2PKH'
@@ -6,7 +6,6 @@ import Transaction from '@bsv/sdk/transaction/Transaction'
 import { Beef } from '@bsv/sdk/transaction/Beef'
 import type { CreateActionInput, SignActionArgs } from '@bsv/sdk/wallet/Wallet.interfaces'
 
-// Copy these from mountaintops (or your fixed versions)
 import Importer from './Importer'
 import getBeefForTxid from './getBeefForTxid'
 
@@ -21,6 +20,10 @@ function getSessionToken(): string | null {
   const hashToken = new URLSearchParams(hash).get('sessionToken')
   if (hashToken) return hashToken
   return new URLSearchParams(window.location.search).get('sessionToken')
+}
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function formatSats(n: number) {
@@ -38,6 +41,21 @@ function looksLikeBase58Address(s: string) {
   return /^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$/.test(t)
 }
 
+function outpointKey(u: Utxo) {
+  return `${u.txid}.${u.vout}`
+}
+
+async function fetchUtxosForAddress(address: string, network: Network): Promise<Utxo[]> {
+  const wocNet = network === 'mainnet' ? 'main' : 'test'
+  const r = await fetch(`https://api.whatsonchain.com/v1/bsv/${wocNet}/address/${address}/unspent/all`)
+  const j = await r.json()
+  if (!r.ok) throw new Error(j?.error ?? `WhatsOnChain error (${r.status})`)
+
+  return (j.result ?? [])
+    .filter((x: any) => x.isSpentInMempoolTx === false)
+    .map((x: any) => ({ txid: x.tx_hash, vout: x.tx_pos, satoshis: x.value }))
+}
+
 const styles = {
   page: {
     minHeight: '100vh',
@@ -46,10 +64,7 @@ const styles = {
     fontFamily: `'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif`,
     padding: 24
   } as React.CSSProperties,
-  shell: {
-    maxWidth: 980,
-    margin: '0 auto'
-  } as React.CSSProperties,
+  shell: { maxWidth: 980, margin: '0 auto' } as React.CSSProperties,
   header: {
     display: 'flex',
     alignItems: 'flex-end',
@@ -59,16 +74,30 @@ const styles = {
   } as React.CSSProperties,
   title: { fontSize: 28, margin: 0, letterSpacing: -0.2 } as React.CSSProperties,
   subtitle: { margin: 0, opacity: 0.8, fontSize: 14 } as React.CSSProperties,
-  grid: {
-    display: 'grid',
-    gap: 14,
-    gridTemplateColumns: '1fr'
+
+  topActions: {
+    display: 'flex',
+    gap: 10,
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'flex-end'
   } as React.CSSProperties,
-  row2: {
-    display: 'grid',
-    gridTemplateColumns: '1fr',
-    gap: 14
-  } as React.CSSProperties,
+  pill: (ok: boolean) =>
+    ({
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '6px 10px',
+      borderRadius: 999,
+      fontSize: 12,
+      fontWeight: 700,
+      border: `1px solid ${ok ? 'rgba(130,255,190,0.30)' : 'rgba(255,255,255,0.14)'}`,
+      background: ok ? 'rgba(130,255,190,0.10)' : 'rgba(255,255,255,0.06)',
+      color: ok ? '#bfffe0' : '#d5daff'
+    } as React.CSSProperties),
+
+  row2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 } as React.CSSProperties,
+
   card: {
     background: 'rgba(255,255,255,0.06)',
     border: '1px solid rgba(255,255,255,0.10)',
@@ -78,13 +107,7 @@ const styles = {
   } as React.CSSProperties,
   cardTitle: { margin: 0, fontSize: 16, letterSpacing: -0.1 } as React.CSSProperties,
   cardDesc: { margin: '6px 0 0', fontSize: 13, opacity: 0.82, lineHeight: 1.35 } as React.CSSProperties,
-  topActions: {
-    display: 'flex',
-    gap: 10,
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    justifyContent: 'flex-end'
-  } as React.CSSProperties,
+
   button: {
     border: '1px solid rgba(255,255,255,0.16)',
     background: 'rgba(255,255,255,0.08)',
@@ -102,27 +125,9 @@ const styles = {
     border: '1px solid rgba(255,110,110,0.35)',
     background: 'rgba(255,110,110,0.10)'
   } as React.CSSProperties,
-  buttonDisabled: {
-    opacity: 0.55,
-    cursor: 'not-allowed'
-  } as React.CSSProperties,
-  pill: (ok: boolean) =>
-    ({
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 8,
-      padding: '6px 10px',
-      borderRadius: 999,
-      fontSize: 12,
-      fontWeight: 700,
-      border: `1px solid ${ok ? 'rgba(130,255,190,0.30)' : 'rgba(255,255,255,0.14)'}`,
-      background: ok ? 'rgba(130,255,190,0.10)' : 'rgba(255,255,255,0.06)',
-      color: ok ? '#bfffe0' : '#d5daff'
-    } as React.CSSProperties),
-  field: {
-    display: 'grid',
-    gap: 6
-  } as React.CSSProperties,
+  buttonDisabled: { opacity: 0.55, cursor: 'not-allowed' } as React.CSSProperties,
+
+  field: { display: 'grid', gap: 6, marginTop: 12 } as React.CSSProperties,
   label: { fontSize: 12, opacity: 0.85 } as React.CSSProperties,
   input: {
     width: '100%',
@@ -134,20 +139,11 @@ const styles = {
     outline: 'none'
   } as React.CSSProperties,
   mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' } as React.CSSProperties,
-  twoCol: {
-    display: 'grid',
-    gridTemplateColumns: '1fr',
-    gap: 12,
-    marginTop: 12
-  } as React.CSSProperties,
-  miniRow: { display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginTop: 10 } as React.CSSProperties,
-  hint: { fontSize: 12, opacity: 0.75, marginTop: 8, lineHeight: 1.35 } as React.CSSProperties,
-  table: {
-    width: '100%',
-    borderCollapse: 'collapse',
-    marginTop: 10,
-    fontSize: 13
-  } as React.CSSProperties,
+
+  miniRow: { display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginTop: 12 } as React.CSSProperties,
+  hint: { fontSize: 12, opacity: 0.75, marginTop: 10, lineHeight: 1.35 } as React.CSSProperties,
+
+  table: { width: '100%', borderCollapse: 'collapse', marginTop: 10, fontSize: 13 } as React.CSSProperties,
   th: {
     textAlign: 'left',
     fontSize: 12,
@@ -160,7 +156,9 @@ const styles = {
     borderBottom: '1px solid rgba(255,255,255,0.08)',
     verticalAlign: 'top'
   } as React.CSSProperties,
+
   logBox: {
+    marginTop: 14,
     background: 'rgba(0,0,0,0.35)',
     border: '1px solid rgba(255,255,255,0.10)',
     borderRadius: 12,
@@ -173,29 +171,29 @@ const styles = {
 }
 
 export default function App() {
+  // sessions / connections
   const [handcashSession, setHandcashSession] = useState<string | null>(() => localStorage.getItem('handcashSession'))
   const [metanetConnected, setMetanetConnected] = useState(false)
-
   const [network, setNetwork] = useState<Network>('mainnet')
 
-  // Receive identity
+  // Receive identity (for HC -> MetaNet deposits)
   const [receiveKeyId, setReceiveKeyId] = useState(() => localStorage.getItem('receiveKeyId') ?? '')
   const [receivePubKey, setReceivePubKey] = useState(() => localStorage.getItem('receivePubKey') ?? '')
   const [receiveAddress, setReceiveAddress] = useState(() => localStorage.getItem('receiveAddress') ?? '')
 
-  // Deposits
+  // Deposit scan state
   const [utxos, setUtxos] = useState<Utxo[]>([])
   const [depositSats, setDepositSats] = useState(0)
-  const [busy, setBusy] = useState<string | null>(null)
 
-  // HandCash payment
-  const [hcDest, setHcDest] = useState(() => localStorage.getItem('hcDest') ?? '')
-  const [hcUsdAmount, setHcUsdAmount] = useState<number>(0.01)
-
-  // MetaNet send
-  const [toAddress, setToAddress] = useState('')
+  // Metanet -> address (HandCash deposit address)
+  const [toAddress, setToAddress] = useState(() => localStorage.getItem('toAddress') ?? '')
   const [toSats, setToSats] = useState(1000)
 
+  // HandCash -> MetaNet amount
+  const [hcUsdAmount, setHcUsdAmount] = useState<number>(0.01)
+
+  const [busy, setBusy] = useState<string | null>(null)
+  const [flowStatus, setFlowStatus] = useState('')
   const [log, setLog] = useState('')
 
   useEffect(() => {
@@ -211,8 +209,8 @@ export default function App() {
     localStorage.setItem('receiveKeyId', receiveKeyId)
     localStorage.setItem('receivePubKey', receivePubKey)
     localStorage.setItem('receiveAddress', receiveAddress)
-    localStorage.setItem('hcDest', hcDest)
-  }, [receiveKeyId, receivePubKey, receiveAddress, hcDest])
+    localStorage.setItem('toAddress', toAddress)
+  }, [receiveKeyId, receivePubKey, receiveAddress, toAddress])
 
   async function connectMetanet() {
     try {
@@ -233,85 +231,43 @@ export default function App() {
     window.location.href = `${API_URL}/auth/handcash/start`
   }
 
-  async function generateReceiveAddress() {
-    try {
-      if (!metanetConnected) throw new Error('Connect MetaNet first.')
-      setBusy('gen-receive')
+  async function generateReceiveAddressIfNeeded(): Promise<{ keyID: string; addr: string; network: Network }> {
+    const { network } = await client.getNetwork({})
+    setNetwork(network)
 
-      const { network } = await client.getNetwork({})
-      setNetwork(network)
-
-      const keyID = `receive_${Date.now()}`
-      const { publicKey } = await client.getPublicKey({
-        protocolID: [1, 'metabridge'],
-        keyID,
-        counterparty: 'anyone',
-        forSelf: true
-      })
-
-      const addr = PublicKey.fromString(publicKey).toAddress(network)
-
-      setReceiveKeyId(keyID)
-      setReceivePubKey(publicKey)
-      setReceiveAddress(addr)
-
-      setHcDest(addr)
-      setLog(`Receive address generated.\nkeyID: ${keyID}\naddress: ${addr}`)
-    } catch (e: any) {
-      setLog(e?.message ?? String(e))
-    } finally {
-      setBusy(null)
+    if (receiveKeyId && receiveAddress) {
+      return { keyID: receiveKeyId, addr: receiveAddress, network }
     }
+
+    const keyID = `receive_${Date.now()}`
+    const { publicKey } = await client.getPublicKey({
+      protocolID: [1, 'metabridge'],
+      keyID,
+      counterparty: 'anyone',
+      forSelf: true
+    })
+    const addr = PublicKey.fromString(publicKey).toAddress(network)
+
+    setReceiveKeyId(keyID)
+    setReceivePubKey(publicKey)
+    setReceiveAddress(addr)
+
+    return { keyID, addr, network }
   }
 
-  async function refreshDeposits() {
-    try {
-      if (!receiveAddress) throw new Error('Generate a receive address first.')
-      setBusy('refresh')
-
-      const wocNet = network === 'mainnet' ? 'main' : 'test'
-      const r = await fetch(`https://api.whatsonchain.com/v1/bsv/${wocNet}/address/${receiveAddress}/unspent/all`)
-      const j = await r.json()
-
-      if (!r.ok) throw new Error(j?.error ?? `WhatsOnChain error (${r.status})`)
-
-      const parsed: Utxo[] =
-        (j.result ?? [])
-          .filter((x: any) => x.isSpentInMempoolTx === false)
-          .map((x: any) => ({ txid: x.tx_hash, vout: x.tx_pos, satoshis: x.value }))
-
-      setUtxos(parsed)
-      const total = parsed.reduce((a, b) => a + b.satoshis, 0)
-      setDepositSats(total)
-
-      setLog(parsed.length ? `Found ${parsed.length} deposit(s): ${formatSats(total)} sats.` : 'No deposits found yet.')
-    } catch (e: any) {
-      setLog(e?.message ?? String(e))
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function importDeposits() {
+  async function importUtxos(keyID: string, spendUtxos: Utxo[], net: Network) {
     let reference: string | undefined
     try {
-      if (!metanetConnected) throw new Error('Connect MetaNet first.')
-      if (!receiveKeyId) throw new Error('Missing receive keyID (generate receive address again).')
-      if (!utxos.length) throw new Error('No deposits to import. Click “Refresh” first.')
-
-      setBusy('import')
-
-      const inputs: CreateActionInput[] = utxos.map(u => ({
+      const inputs: CreateActionInput[] = spendUtxos.map(u => ({
         outpoint: `${u.txid}.${u.vout}`,
         inputDescription: 'Import deposit',
         unlockingScriptLength: 108
       }))
 
-      // Build BEEF for the input source txs
       const inputBEEF = new Beef()
-      for (const u of utxos) {
+      for (const u of spendUtxos) {
         if (!inputBEEF.findTxid(u.txid)) {
-          const beef = await getBeefForTxid(u.txid, network === 'mainnet' ? 'main' : 'test')
+          const beef = await getBeefForTxid(u.txid, net === 'mainnet' ? 'main' : 'test')
           inputBEEF.mergeBeef(beef)
         }
       }
@@ -327,42 +283,43 @@ export default function App() {
 
       const tx = Transaction.fromAtomicBEEF(signableTransaction.tx)
 
-      // ✅ IMPORTANT: use your metabridge derivation + receiveKeyId (NOT mountaintops hardcode)
-      const importer = new Importer([1, 'metabridge'], receiveKeyId, 'anyone')
+      const importer = new Importer([1, 'metabridge'], keyID, 'anyone')
       const unlocker = importer.unlock(client)
 
       const signActionArgs: SignActionArgs = { reference, spends: {} }
-
       for (let i = 0; i < inputs.length; i++) {
         const script = await unlocker.sign(tx, i)
         signActionArgs.spends[i] = { unlockingScript: script.toHex() }
       }
 
       await client.signAction(signActionArgs)
-
-      setLog(`Imported deposits: ${formatSats(depositSats)} sats.`)
-      setUtxos([])
-      setDepositSats(0)
-    } catch (e: any) {
+    } catch (e) {
       if (reference) {
-        try { await client.abortAction({ reference }) } catch {}
+        try {
+          await client.abortAction({ reference })
+        } catch {}
       }
-      setLog(`Import failed: ${e?.message ?? String(e)}`)
-    } finally {
-      setBusy(null)
+      throw e
     }
   }
 
-  async function handcashPayUsd() {
+  async function oneClickHandCashToMetaNet() {
     try {
       if (!handcashSession) throw new Error('Connect HandCash first.')
-      const dest = hcDest.trim()
-      if (!dest) throw new Error('Enter a destination.')
-      setBusy('handcash-pay')
+      if (!metanetConnected) throw new Error('Connect MetaNet first.')
 
-      // keep under 25 chars
-      const note = 'MetaBridge deposit'
+      setBusy('hc->mn')
+      setFlowStatus('Preparing…')
+      setLog('')
 
+      const { keyID, addr, network } = await generateReceiveAddressIfNeeded()
+
+      setFlowStatus('Snapshotting current deposits…')
+      const before = await fetchUtxosForAddress(addr, network)
+      const beforeSet = new Set(before.map(outpointKey))
+
+      setFlowStatus('Sending from HandCash…')
+      const note = 'MetaBridge deposit' // <= 25 chars
       const r = await fetch(`${API_URL}/api/handcash/pay`, {
         method: 'POST',
         headers: {
@@ -370,50 +327,79 @@ export default function App() {
           Authorization: `Bearer ${handcashSession}`
         },
         body: JSON.stringify({
-          destination: dest,
+          destination: addr,
           sendAmount: hcUsdAmount,
           currencyCode: 'USD',
           description: note
         })
       })
-
       const j = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(j?.error ?? JSON.stringify(j))
 
-      setLog(`HandCash payment sent.\n${JSON.stringify(j, null, 2)}`)
+      setFlowStatus('Waiting for deposit to appear…')
+      const maxTries = 40
+      const intervalMs = 2500
+      let newUtxos: Utxo[] = []
+      for (let i = 0; i < maxTries; i++) {
+        const after = await fetchUtxosForAddress(addr, network)
+        newUtxos = after.filter(u => !beforeSet.has(outpointKey(u)))
+        if (newUtxos.length > 0) break
+        await sleep(intervalMs)
+      }
+      if (newUtxos.length === 0) throw new Error('Deposit not detected yet. Try again in a moment.')
+
+      const totalNew = newUtxos.reduce((a, b) => a + b.satoshis, 0)
+      setUtxos(newUtxos)
+      setDepositSats(totalNew)
+
+      setFlowStatus(`Importing ${newUtxos.length} deposit(s)…`)
+      await importUtxos(keyID, newUtxos, network)
+
+      setFlowStatus('Done ✅')
+      setLog(
+        `✅ HandCash → MetaNet complete\n` +
+          `Deposit address: ${addr}\n` +
+          `Imported: ${formatSats(totalNew)} sats\n` +
+          `Outpoints: ${newUtxos.map(outpointKey).join(', ')}`
+      )
+
+      setUtxos([])
+      setDepositSats(0)
     } catch (e: any) {
-      setLog(e?.message ?? String(e))
+      setFlowStatus('')
+      setLog(`❌ ${e?.message ?? String(e)}`)
     } finally {
       setBusy(null)
     }
   }
 
-  async function metanetSendToAddress() {
+  async function metanetToHandcashAddress() {
     try {
       if (!metanetConnected) throw new Error('Connect MetaNet first.')
       const addr = toAddress.trim()
-      if (!addr) throw new Error('Enter a destination address.')
+      if (!addr) throw new Error('Enter your HandCash deposit address.')
       if (!looksLikeBase58Address(addr)) throw new Error('That doesn’t look like a valid base58 address.')
       if (!Number.isSafeInteger(toSats) || toSats <= 0) throw new Error('Satoshis must be a positive integer.')
-      setBusy('metanet-send')
+      setBusy('mn->hc')
+      setLog('')
 
       const lockingScript = new P2PKH().lock(addr).toHex()
       const { txid } = await client.createAction({
-        description: 'MetaBridge: send',
-        outputs: [{ satoshis: toSats, lockingScript, outputDescription: 'Transfer' }]
+        description: 'MetaBridge: MetaNet → HandCash',
+        outputs: [{ satoshis: toSats, lockingScript, outputDescription: 'To HandCash deposit address' }]
       })
 
-      setLog(`Sent ${formatSats(toSats)} sats.\nTXID: ${txid}`)
-      setToAddress('')
+      setLog(`✅ MetaNet → HandCash sent\nSats: ${formatSats(toSats)}\nTXID: ${txid}`)
       setToSats(1000)
     } catch (e: any) {
-      setLog(e?.message ?? String(e))
+      setLog(`❌ ${e?.message ?? String(e)}`)
     } finally {
       setBusy(null)
     }
   }
 
-  const canImport = metanetConnected && !!receiveKeyId && utxos.length > 0 && busy == null
+  const canOneClick = metanetConnected && !!handcashSession && busy == null
+  const canMetaSend = metanetConnected && busy == null
 
   return (
     <div style={styles.page}>
@@ -421,16 +407,13 @@ export default function App() {
         <div style={styles.header}>
           <div>
             <h1 style={styles.title}>MetaBridge</h1>
-            <p style={styles.subtitle}>Move value between HandCash and your MetaNet wallet — deposits included.</p>
+            <p style={styles.subtitle}>Two buttons. Two directions. No extra steps.</p>
           </div>
 
           <div style={styles.topActions}>
-            <span style={styles.pill(metanetConnected)}>
-              {metanetConnected ? 'MetaNet connected' : 'MetaNet not connected'}
-            </span>
-            <span style={styles.pill(!!handcashSession)}>
-              {handcashSession ? 'HandCash connected' : 'HandCash not connected'}
-            </span>
+            <span style={styles.pill(metanetConnected)}>{metanetConnected ? 'MetaNet connected' : 'MetaNet not connected'}</span>
+            <span style={styles.pill(!!handcashSession)}>{handcashSession ? 'HandCash connected' : 'HandCash not connected'}</span>
+
             <button
               style={{ ...styles.button, ...styles.buttonPrimary, ...(busy ? styles.buttonDisabled : {}) }}
               onClick={connectMetanet}
@@ -438,12 +421,11 @@ export default function App() {
             >
               Connect MetaNet
             </button>
-            <button
-              style={{ ...styles.button, ...styles.buttonPrimary }}
-              onClick={connectHandcash}
-            >
+
+            <button style={{ ...styles.button, ...styles.buttonPrimary }} onClick={connectHandcash}>
               Connect HandCash
             </button>
+
             {handcashSession && (
               <button
                 style={{ ...styles.button, ...styles.buttonDanger }}
@@ -459,76 +441,66 @@ export default function App() {
           </div>
         </div>
 
-        <div style={{ ...styles.row2, gridTemplateColumns: '1.15fr 0.85fr' }}>
-          {/* Receive + Import */}
+        <div style={styles.row2}>
+          {/* HandCash -> MetaNet */}
           <div style={styles.card}>
-            <h3 style={styles.cardTitle}>Receive (HandCash → MetaNet)</h3>
+            <h3 style={styles.cardTitle}>HandCash → MetaNet</h3>
             <p style={styles.cardDesc}>
-              Generate a deposit address from your wallet. After you pay it, hit refresh and import to bring the funds into the wallet.
             </p>
 
-            <div style={{ ...styles.twoCol, gridTemplateColumns: '1fr 1fr' }}>
-              <div style={styles.field}>
-                <div style={styles.label}>Receive keyID</div>
-                <input style={{ ...styles.input, ...styles.mono }} readOnly value={receiveKeyId} placeholder="(none yet)" />
-              </div>
-              <div style={styles.field}>
-                <div style={styles.label}>Network</div>
-                <input style={{ ...styles.input, ...styles.mono }} readOnly value={network} />
+            <div style={styles.field}>
+              {/* <div style={styles.label}>Deposit address (auto)</div>
+              <input
+                style={{ ...styles.input, ...styles.mono }}
+                value={receiveAddress}
+                readOnly
+                placeholder="Connect MetaNet, then click Deposit…"
+              /> */}
+              <div style={styles.hint}>
+                keyID: <span style={styles.mono}>{receiveKeyId || '(none yet)'}</span> • network:{' '}
+                <span style={styles.mono}>{network}</span>
               </div>
             </div>
 
-            <div style={{ ...styles.field, marginTop: 12 }}>
-              <div style={styles.label}>Deposit address</div>
-              <input style={{ ...styles.input, ...styles.mono }} readOnly value={receiveAddress} placeholder="Generate to get an address…" />
+            <div style={styles.field}>
+              <div style={styles.label}>Amount (USD)</div>
+              <input
+                style={styles.input}
+                type="number"
+                step="0.01"
+                value={hcUsdAmount}
+                onChange={e => setHcUsdAmount(Number(e.target.value))}
+                disabled={!!busy}
+              />
             </div>
 
             <div style={styles.miniRow}>
               <button
-                style={{ ...styles.button, ...styles.buttonPrimary, ...(busy ? styles.buttonDisabled : {}) }}
-                onClick={generateReceiveAddress}
-                disabled={!!busy || !metanetConnected}
-                title={!metanetConnected ? 'Connect MetaNet first' : ''}
+                style={{
+                  ...styles.button,
+                  ...styles.buttonPrimary,
+                  ...(canOneClick ? {} : styles.buttonDisabled)
+                }}
+                onClick={oneClickHandCashToMetaNet}
+                disabled={!canOneClick}
               >
-                {busy === 'gen-receive' ? 'Generating…' : 'Generate address'}
+                {busy === 'hc->mn' ? 'Depositing…' : `Deposit $${hcUsdAmount} → MetaNet`}
               </button>
 
               <button
-                style={{ ...styles.button, ...(busy ? styles.buttonDisabled : {}) }}
+                style={{ ...styles.button, ...(receiveAddress && !busy ? {} : styles.buttonDisabled) }}
                 onClick={() => {
                   if (!receiveAddress) return
                   navigator.clipboard.writeText(receiveAddress)
                   setLog('Deposit address copied.')
                 }}
-                disabled={!!busy || !receiveAddress}
+                disabled={!receiveAddress || !!busy}
               >
-                Copy
-              </button>
-
-              <button
-                style={{ ...styles.button, ...(busy ? styles.buttonDisabled : {}) }}
-                onClick={refreshDeposits}
-                disabled={!!busy || !receiveAddress}
-              >
-                {busy === 'refresh' ? 'Refreshing…' : 'Refresh deposits'}
-              </button>
-
-              <button
-                style={{
-                  ...styles.button,
-                  ...styles.buttonPrimary,
-                  ...(canImport ? {} : styles.buttonDisabled)
-                }}
-                onClick={importDeposits}
-                disabled={!canImport}
-              >
-                {busy === 'import' ? 'Importing…' : `Import (${formatSats(depositSats)} sats)`}
+                Copy address
               </button>
             </div>
 
-            <p style={styles.hint}>
-              Quick note: deposits land on-chain at the address. “Import” is what pulls them into the wallet’s spendable set.
-            </p>
+            {busy === 'hc->mn' && flowStatus && <div style={styles.hint}>{flowStatus}</div>}
 
             {utxos.length > 0 && (
               <table style={styles.table}>
@@ -539,7 +511,7 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {utxos.slice(0, 8).map((u, idx) => (
+                  {utxos.slice(0, 6).map((u, idx) => (
                     <tr key={`${u.txid}.${u.vout}.${idx}`}>
                       <td style={{ ...styles.td, ...styles.mono }}>
                         {shortTxid(u.txid)}.{u.vout}
@@ -547,86 +519,32 @@ export default function App() {
                       <td style={styles.td}>{formatSats(u.satoshis)}</td>
                     </tr>
                   ))}
+                  <tr>
+                    <td style={{ ...styles.td, opacity: 0.8 }}>Total</td>
+                    <td style={styles.td}>{formatSats(depositSats)}</td>
+                  </tr>
                 </tbody>
               </table>
             )}
           </div>
 
-          {/* HandCash pay */}
+          {/* MetaNet -> HandCash */}
           <div style={styles.card}>
-            <h3 style={styles.cardTitle}>Send from HandCash</h3>
+            <h3 style={styles.cardTitle}>MetaNet → HandCash</h3>
             <p style={styles.cardDesc}>
-              Send a small payment to the deposit address (or any handle/paymail/address). Keep the note short.
+              Paste your HandCash <b>deposit address</b> (from the HandCash app), then send satoshis from MetaNet.
             </p>
 
             <div style={styles.field}>
-              <div style={styles.label}>Destination</div>
-              <input
-                style={{ ...styles.input, ...styles.mono }}
-                value={hcDest}
-                onChange={e => setHcDest(e.target.value)}
-                placeholder="address / $handle / paymail"
-              />
-            </div>
-
-            <div style={{ ...styles.field, marginTop: 12 }}>
-              <div style={styles.label}>Amount (USD)</div>
-              <input
-                style={styles.input}
-                type="number"
-                step="0.01"
-                value={hcUsdAmount}
-                onChange={e => setHcUsdAmount(Number(e.target.value))}
-              />
-            </div>
-
-            <div style={styles.miniRow}>
-              <button
-                style={{
-                  ...styles.button,
-                  ...styles.buttonPrimary,
-                  ...((!handcashSession || busy) ? styles.buttonDisabled : {})
-                }}
-                onClick={handcashPayUsd}
-                disabled={!handcashSession || !!busy}
-              >
-                {busy === 'handcash-pay' ? 'Sending…' : 'Send'}
-              </button>
-
-              <button
-                style={{ ...styles.button, ...((!receiveAddress || busy) ? styles.buttonDisabled : {}) }}
-                onClick={() => {
-                  if (!receiveAddress) return
-                  setHcDest(receiveAddress)
-                  setLog('Destination set to your deposit address.')
-                }}
-                disabled={!receiveAddress || !!busy}
-              >
-                Use my deposit address
-              </button>
-            </div>
-
-            <p style={styles.hint}>
-              If you don’t see it after sending: refresh deposits, then import.
-            </p>
-          </div>
-        </div>
-
-        {/* MetaNet send */}
-        <div style={styles.card}>
-          <h3 style={styles.cardTitle}>Send from MetaNet</h3>
-          <p style={styles.cardDesc}>Send satoshis from your MetaNet wallet to any standard BSV address.</p>
-
-          <div style={{ ...styles.twoCol, gridTemplateColumns: '1.4fr 0.6fr' }}>
-            <div style={styles.field}>
-              <div style={styles.label}>Destination address</div>
+              <div style={styles.label}>HandCash deposit address</div>
               <input
                 style={{ ...styles.input, ...styles.mono }}
                 value={toAddress}
                 onChange={e => setToAddress(e.target.value)}
-                placeholder="base58 address"
+                placeholder="base58 address (starts with 1...)"
               />
             </div>
+
             <div style={styles.field}>
               <div style={styles.label}>Satoshis</div>
               <input
@@ -637,39 +555,37 @@ export default function App() {
                 onChange={e => setToSats(Math.floor(Number(e.target.value)))}
               />
             </div>
-          </div>
 
-          <div style={styles.miniRow}>
-            <button
-              style={{
-                ...styles.button,
-                ...styles.buttonPrimary,
-                ...((!metanetConnected || busy) ? styles.buttonDisabled : {})
-              }}
-              onClick={metanetSendToAddress}
-              disabled={!metanetConnected || !!busy}
-            >
-              {busy === 'metanet-send' ? 'Sending…' : 'Send sats'}
-            </button>
+            <div style={styles.miniRow}>
+              <button
+                style={{
+                  ...styles.button,
+                  ...styles.buttonPrimary,
+                  ...(canMetaSend ? {} : styles.buttonDisabled)
+                }}
+                onClick={metanetToHandcashAddress}
+                disabled={!canMetaSend}
+              >
+                {busy === 'mn->hc' ? 'Sending…' : `Send ${formatSats(toSats)} sats`}
+              </button>
+            </div>
+
+            <div style={styles.hint}>
+              Tip: start small. HandCash credits deposits on-chain; the app may update after a moment.
+            </div>
           </div>
         </div>
 
-        {/* Log */}
-        <div style={styles.card}>
-          <h3 style={styles.cardTitle}>Activity</h3>
-          <p style={styles.cardDesc}>Last action / error output.</p>
-          <div style={{ ...styles.logBox, ...styles.mono }}>{log || '(nothing yet)'}</div>
-        </div>
-
-        <div style={{ marginTop: 14, opacity: 0.65, fontSize: 12 }}>
-          Tip: For dev, keep the same receive keyID/address while testing so imports always sign with the right key.
+        {/* Activity */}
+        <div style={styles.logBox}>
+          <div style={{ fontWeight: 800, marginBottom: 6 }}>Activity</div>
+          <div style={{ ...styles.mono }}>{log || '(nothing yet)'}</div>
         </div>
       </div>
 
-      {/* Responsive tweak */}
       <style>{`
-        @media (max-width: 860px) {
-          .two { grid-template-columns: 1fr !important; }
+        @media (max-width: 980px) {
+          .row2 { grid-template-columns: 1fr !important; }
         }
       `}</style>
     </div>
