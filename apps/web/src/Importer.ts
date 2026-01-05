@@ -5,7 +5,7 @@ import Signature from '@bsv/sdk/primitives/Signature'
 import Transaction from '@bsv/sdk/transaction/Transaction'
 import TransactionSignature from '@bsv/sdk/primitives/TransactionSignature'
 import { sha256 } from '@bsv/sdk/primitives/Hash'
-import { WalletInterface } from '@bsv/sdk/wallet/Wallet.interfaces'
+import { WalletInterface, WalletProtocol } from '@bsv/sdk/wallet/Wallet.interfaces'
 import { toArray } from '@bsv/sdk/primitives/utils'
 
 function verifyTruthy<T>(v: T | undefined): T {
@@ -13,13 +13,12 @@ function verifyTruthy<T>(v: T | undefined): T {
   return v
 }
 
-type ProtocolID = [number, string]
 
 export default class Importer implements ScriptTemplate {
   lock!: () => LockingScript | Promise<LockingScript>
 
   constructor(
-    private protocolID: ProtocolID,
+    private protocolID: WalletProtocol,
     private keyID: string,
     private counterparty: string = 'anyone'
   ) {}

@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite"
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "tsc -b && vite build"
   },
   "dependencies": {
     "@bsv/sdk": "^1.9.31",

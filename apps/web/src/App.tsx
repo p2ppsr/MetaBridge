@@ -9,18 +9,18 @@ import type { CreateActionInput, SignActionArgs } from '@bsv/sdk/wallet/Wallet.i
 import Importer from './Importer'
 import getBeefForTxid from './getBeefForTxid'
 
-const API_URL = 'http://localhost:8080'
+/**
+ * IMPORTANT:
+ * - Because we’re using HttpOnly cookies for HandCash sessions,
+ *   ALL API calls must be same-origin + credentials: 'include'
+ *
+ * So we intentionally do NOT use http://localhost:8080 here.
+ */
+const API_URL = '' // same-origin
 const client = new WalletClient('auto')
 
 type Network = 'mainnet' | 'testnet'
 type Utxo = { txid: string; vout: number; satoshis: number }
-
-function getSessionToken(): string | null {
-  const hash = window.location.hash.replace(/^#/, '')
-  const hashToken = new URLSearchParams(hash).get('sessionToken')
-  if (hashToken) return hashToken
-  return new URLSearchParams(window.location.search).get('sessionToken')
-}
 
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -170,9 +170,16 @@ const styles = {
   } as React.CSSProperties
 }
 
+async function apiGetSession(): Promise<boolean> {
+  const r = await fetch(`${API_URL}/api/session`, { credentials: 'include' })
+  if (!r.ok) return false
+  const j = await r.json().catch(() => ({}))
+  return !!j?.ok
+}
+
 export default function App() {
-  // sessions / connections
-  const [handcashSession, setHandcashSession] = useState<string | null>(() => localStorage.getItem('handcashSession'))
+  // connections
+  const [handcashConnected, setHandcashConnected] = useState(false)
   const [metanetConnected, setMetanetConnected] = useState(false)
   const [network, setNetwork] = useState<Network>('mainnet')
 
@@ -197,12 +204,10 @@ export default function App() {
   const [log, setLog] = useState('')
 
   useEffect(() => {
-    const token = getSessionToken()
-    if (token) {
-      localStorage.setItem('handcashSession', token)
-      setHandcashSession(token)
-      window.history.replaceState(null, '', window.location.pathname)
-    }
+    // On load, ask backend if cookie session exists.
+    apiGetSession()
+      .then(ok => setHandcashConnected(ok))
+      .catch(() => setHandcashConnected(false))
   }, [])
 
   useEffect(() => {
@@ -228,7 +233,22 @@ export default function App() {
   }
 
   function connectHandcash() {
-    window.location.href = `${API_URL}/auth/handcash/start`
+    // Same-origin so cookies work.
+    window.location.href = `/auth/handcash/start`
+  }
+
+  async function logoutHandcash() {
+    try {
+      setBusy('logout')
+      const r = await fetch(`/auth/logout`, { method: 'POST', credentials: 'include' })
+      if (!r.ok) throw new Error(`logout failed (${r.status})`)
+      setHandcashConnected(false)
+      setLog('HandCash logged out.')
+    } catch (e: any) {
+      setLog(`Logout failed: ${e?.message ?? String(e)}`)
+    } finally {
+      setBusy(null)
+    }
   }
 
   async function generateReceiveAddressIfNeeded(): Promise<{ keyID: string; addr: string; network: Network }> {
@@ -305,7 +325,7 @@ export default function App() {
 
   async function oneClickHandCashToMetaNet() {
     try {
-      if (!handcashSession) throw new Error('Connect HandCash first.')
+      if (!handcashConnected) throw new Error('Connect HandCash first.')
       if (!metanetConnected) throw new Error('Connect MetaNet first.')
 
       setBusy('hc->mn')
@@ -320,12 +340,12 @@ export default function App() {
 
       setFlowStatus('Sending from HandCash…')
       const note = 'MetaBridge deposit' // <= 25 chars
+
+      // ✅ COOKIE SESSION FIX: same-origin + credentials include + NO Authorization header
       const r = await fetch(`${API_URL}/api/handcash/pay`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${handcashSession}`
-        },
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           destination: addr,
           sendAmount: hcUsdAmount,
@@ -333,6 +353,7 @@ export default function App() {
           description: note
         })
       })
+
       const j = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(j?.error ?? JSON.stringify(j))
 
@@ -398,7 +419,7 @@ export default function App() {
     }
   }
 
-  const canOneClick = metanetConnected && !!handcashSession && busy == null
+  const canOneClick = metanetConnected && handcashConnected && busy == null
   const canMetaSend = metanetConnected && busy == null
 
   return (
@@ -412,7 +433,7 @@ export default function App() {
 
           <div style={styles.topActions}>
             <span style={styles.pill(metanetConnected)}>{metanetConnected ? 'MetaNet connected' : 'MetaNet not connected'}</span>
-            <span style={styles.pill(!!handcashSession)}>{handcashSession ? 'HandCash connected' : 'HandCash not connected'}</span>
+            <span style={styles.pill(handcashConnected)}>{handcashConnected ? 'HandCash connected' : 'HandCash not connected'}</span>
 
             <button
               style={{ ...styles.button, ...styles.buttonPrimary, ...(busy ? styles.buttonDisabled : {}) }}
@@ -422,18 +443,19 @@ export default function App() {
               Connect MetaNet
             </button>
 
-            <button style={{ ...styles.button, ...styles.buttonPrimary }} onClick={connectHandcash}>
+            <button
+              style={{ ...styles.button, ...styles.buttonPrimary, ...(busy ? styles.buttonDisabled : {}) }}
+              onClick={connectHandcash}
+              disabled={!!busy}
+            >
               Connect HandCash
             </button>
 
-            {handcashSession && (
+            {handcashConnected && (
               <button
-                style={{ ...styles.button, ...styles.buttonDanger }}
-                onClick={() => {
-                  localStorage.removeItem('handcashSession')
-                  setHandcashSession(null)
-                  setLog('HandCash session cleared locally.')
-                }}
+                style={{ ...styles.button, ...styles.buttonDanger, ...(busy ? styles.buttonDisabled : {}) }}
+                onClick={logoutHandcash}
+                disabled={!!busy}
               >
                 Logout
               </button>
@@ -445,17 +467,8 @@ export default function App() {
           {/* HandCash -> MetaNet */}
           <div style={styles.card}>
             <h3 style={styles.cardTitle}>HandCash → MetaNet</h3>
-            <p style={styles.cardDesc}>
-            </p>
 
             <div style={styles.field}>
-              {/* <div style={styles.label}>Deposit address (auto)</div>
-              <input
-                style={{ ...styles.input, ...styles.mono }}
-                value={receiveAddress}
-                readOnly
-                placeholder="Connect MetaNet, then click Deposit…"
-              /> */}
               <div style={styles.hint}>
                 keyID: <span style={styles.mono}>{receiveKeyId || '(none yet)'}</span> • network:{' '}
                 <span style={styles.mono}>{network}</span>
@@ -476,11 +489,7 @@ export default function App() {
 
             <div style={styles.miniRow}>
               <button
-                style={{
-                  ...styles.button,
-                  ...styles.buttonPrimary,
-                  ...(canOneClick ? {} : styles.buttonDisabled)
-                }}
+                style={{ ...styles.button, ...styles.buttonPrimary, ...(canOneClick ? {} : styles.buttonDisabled) }}
                 onClick={oneClickHandCashToMetaNet}
                 disabled={!canOneClick}
               >
@@ -558,11 +567,7 @@ export default function App() {
 
             <div style={styles.miniRow}>
               <button
-                style={{
-                  ...styles.button,
-                  ...styles.buttonPrimary,
-                  ...(canMetaSend ? {} : styles.buttonDisabled)
-                }}
+                style={{ ...styles.button, ...styles.buttonPrimary, ...(canMetaSend ? {} : styles.buttonDisabled) }}
                 onClick={metanetToHandcashAddress}
                 disabled={!canMetaSend}
               >
@@ -570,13 +575,10 @@ export default function App() {
               </button>
             </div>
 
-            <div style={styles.hint}>
-              Tip: start small. HandCash credits deposits on-chain; the app may update after a moment.
-            </div>
+            <div style={styles.hint}>Tip: start small. HandCash credits deposits on-chain; the app may update after a moment.</div>
           </div>
         </div>
 
-        {/* Activity */}
         <div style={styles.logBox}>
           <div style={{ fontWeight: 800, marginBottom: 6 }}>Activity</div>
           <div style={{ ...styles.mono }}>{log || '(nothing yet)'}</div>
