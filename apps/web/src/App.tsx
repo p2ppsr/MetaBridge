@@ -1,16 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+// src/App.tsx
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import WalletClient from '@bsv/sdk/wallet/WalletClient'
 import PublicKey from '@bsv/sdk/primitives/PublicKey'
 import P2PKH from '@bsv/sdk/script/templates/P2PKH'
-
-import TextField from '@mui/material/TextField'
-import InputAdornment from '@mui/material/InputAdornment'
 import { CurrencyConverter } from 'amountinator'
 import { AmountDisplay } from 'amountinator-react'
 
 import getBeefForTxid from './getBeefForTxid'
 
-const API_URL = '' // keep empty when frontend+backend are on same domain
+// For prod (frontend+backend same domain), set VITE_API_URL="" or leave undefined.
+// For local dev, set VITE_API_URL="http://localhost:8080"
+const API_URL = 'http://localhost:8080'
 const client = new WalletClient('auto')
 
 type Network = 'mainnet' | 'testnet'
@@ -26,7 +26,8 @@ type RemittanceParams = {
 const PENDING_REMIT_LS_KEY = 'pendingRemittance_v1'
 const REMIT_ADDR_LS_KEY = 'remitAddress'
 const TO_ADDR_LS_KEY = 'toAddress'
-const MN_AMOUNT_LS_KEY = 'mn_amount_input_v1' // the preferred-currency string the user typed (e.g. "2.50")
+const MN_AMOUNT_LS_KEY = 'mnToHcAmount' // currency string for the amount field
+
 
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -66,15 +67,102 @@ async function fetchUtxosForAddress(address: string, network: Network): Promise<
     .map((x: any) => ({ txid: x.tx_hash, vout: x.tx_pos, satoshis: x.value }))
 }
 
+async function apiGetSession(): Promise<boolean> {
+  const r = await fetch(`${API_URL}/api/session`, { credentials: 'include' })
+  if (!r.ok) return false
+  const j = await r.json().catch(() => ({}))
+  return !!j?.ok
+}
+
+/**
+ * Amountinator currency input:
+ * - Shows the user's preferred currency symbol
+ * - Converts currency -> satoshis for sending
+ */
+function AmountinatorInput(props: {
+  label: string
+  value: string
+  onValueChange: (v: string) => void
+  onSatoshisChange: (sats: number | null) => void
+  disabled?: boolean
+}) {
+  const { label, value, onValueChange, onSatoshisChange, disabled } = props
+  const converter = useMemo(() => new CurrencyConverter(), [])
+  const [ready, setReady] = useState(false)
+  const [symbol, setSymbol] = useState('$')
+  const seqRef = useRef(0)
+
+  useEffect(() => {
+    let mounted = true
+    ;(async () => {
+      try {
+        await converter.initialize()
+        if (!mounted) return
+        setSymbol(converter.getCurrencySymbol())
+        setReady(true)
+      } catch {
+        // If amountinator fails to init, we still allow entry; conversion will just be null.
+        if (!mounted) return
+        setReady(false)
+      }
+    })()
+    return () => {
+      mounted = false
+    }
+  }, [converter])
+
+  async function handleChange(raw: string) {
+    // keep digits + '.' only
+    const input = raw.replace(/[^0-9.]/g, '')
+    onValueChange(input)
+
+    // empty / partial -> null satoshis
+    if (!ready || input === '' || input === '.' || input === '..') {
+      onSatoshisChange(null)
+      return
+    }
+
+    const mySeq = ++seqRef.current
+    try {
+      const sats = await converter.convertToSatoshis(Number(input))
+      // prevent out-of-order async updates
+      if (mySeq !== seqRef.current) return
+      // amountinator might return a bigint/number; normalize
+      const n = typeof sats === 'bigint' ? Number(sats) : Number(sats)
+      if (!Number.isFinite(n) || n <= 0) onSatoshisChange(null)
+      else onSatoshisChange(Math.floor(n))
+    } catch {
+      if (mySeq !== seqRef.current) return
+      onSatoshisChange(null)
+    }
+  }
+
+  return (
+    <div style={styles.field}>
+      <div style={styles.label}>{label}</div>
+      <div style={styles.amountWrap}>
+        <span style={styles.amountSymbol}>{symbol}</span>
+        <input
+          style={styles.amountInput}
+          value={value}
+          onChange={e => void handleChange(e.target.value)}
+          placeholder={ready ? '0.00' : '…'}
+          inputMode="decimal"
+          disabled={!!disabled}
+        />
+      </div>
+    </div>
+  )
+}
+
 const styles = {
   page: {
     minHeight: '100vh',
-    background: 'radial-gradient(1400px 800px at 50% -200px, rgba(120,150,255,0.22) 0%, rgba(10,12,22,0.0) 55%), linear-gradient(180deg, #0b1020 0%, #070914 100%)',
+    background: 'linear-gradient(180deg, #0b1020 0%, #070914 100%)',
     color: '#e9ecff',
     fontFamily: `'Inter', system-ui, -apple-system, Segoe UI, Roboto, sans-serif`,
-    padding: 'clamp(16px, 3vw, 24px)'
+    padding: 24
   } as React.CSSProperties,
-
   shell: { maxWidth: 980, margin: '0 auto' } as React.CSSProperties,
 
   header: {
@@ -85,7 +173,6 @@ const styles = {
     marginBottom: 18,
     flexWrap: 'wrap'
   } as React.CSSProperties,
-
   title: { fontSize: 28, margin: 0, letterSpacing: -0.2 } as React.CSSProperties,
   subtitle: { margin: 0, opacity: 0.8, fontSize: 14 } as React.CSSProperties,
 
@@ -113,7 +200,7 @@ const styles = {
 
   row2: {
     display: 'grid',
-    gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)',
+    gridTemplateColumns: 'minmax(320px, 1fr) minmax(320px, 1fr)',
     gap: 14,
     alignItems: 'start'
   } as React.CSSProperties,
@@ -124,9 +211,8 @@ const styles = {
     borderRadius: 14,
     padding: 16,
     boxShadow: '0 14px 40px rgba(0,0,0,0.35)',
-    minWidth: 0
+    minWidth: 0 // prevents overflow/jumping on resize
   } as React.CSSProperties,
-
   cardTitle: { margin: 0, fontSize: 16, letterSpacing: -0.1 } as React.CSSProperties,
   cardDesc: { margin: '6px 0 0', fontSize: 13, opacity: 0.82, lineHeight: 1.35 } as React.CSSProperties,
 
@@ -138,19 +224,19 @@ const styles = {
     borderRadius: 10,
     cursor: 'pointer',
     fontWeight: 700,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 10,
     whiteSpace: 'nowrap'
   } as React.CSSProperties,
-
   buttonPrimary: {
     border: '1px solid rgba(120,150,255,0.45)',
     background: 'linear-gradient(180deg, rgba(120,150,255,0.35) 0%, rgba(120,150,255,0.18) 100%)'
   } as React.CSSProperties,
-
   buttonDanger: {
     border: '1px solid rgba(255,110,110,0.35)',
     background: 'rgba(255,110,110,0.10)'
   } as React.CSSProperties,
-
   buttonDisabled: { opacity: 0.55, cursor: 'not-allowed' } as React.CSSProperties,
 
   field: { display: 'grid', gap: 6, marginTop: 12 } as React.CSSProperties,
@@ -163,25 +249,34 @@ const styles = {
     background: 'rgba(0,0,0,0.28)',
     color: '#e9ecff',
     padding: '10px 12px',
-    outline: 'none'
+    outline: 'none',
+    minWidth: 0
+  } as React.CSSProperties,
+
+  amountWrap: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    borderRadius: 10,
+    border: '1px solid rgba(255,255,255,0.12)',
+    background: 'rgba(0,0,0,0.28)',
+    padding: '10px 12px'
+  } as React.CSSProperties,
+  amountSymbol: { opacity: 0.9, fontWeight: 800 } as React.CSSProperties,
+  amountInput: {
+    width: '100%',
+    border: 'none',
+    outline: 'none',
+    background: 'transparent',
+    color: '#e9ecff',
+    fontSize: 14,
+    minWidth: 0
   } as React.CSSProperties,
 
   mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' } as React.CSSProperties,
 
   miniRow: { display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginTop: 12 } as React.CSSProperties,
-
-  hint: { fontSize: 12, opacity: 0.78, marginTop: 10, lineHeight: 1.35 } as React.CSSProperties,
-
-  notice: {
-    marginTop: 10,
-    fontSize: 12,
-    lineHeight: 1.35,
-    padding: '10px 12px',
-    borderRadius: 12,
-    border: '1px solid rgba(255, 208, 120, 0.28)',
-    background: 'rgba(255, 208, 120, 0.08)',
-    color: '#ffe8bf'
-  } as React.CSSProperties,
+  hint: { fontSize: 12, opacity: 0.75, marginTop: 10, lineHeight: 1.35 } as React.CSSProperties,
 
   table: { width: '100%', borderCollapse: 'collapse', marginTop: 10, fontSize: 13 } as React.CSSProperties,
   th: {
@@ -207,113 +302,14 @@ const styles = {
     whiteSpace: 'pre-wrap',
     lineHeight: 1.35,
     fontSize: 13
+  } as React.CSSProperties,
+
+  amountInline: {
+    display: 'inline-flex',
+    alignItems: 'baseline',
+    gap: 8,
+    whiteSpace: 'nowrap'
   } as React.CSSProperties
-}
-
-async function apiGetSession(): Promise<boolean> {
-  const r = await fetch(`${API_URL}/api/session`, { credentials: 'include' })
-  if (!r.ok) return false
-  const j = await r.json().catch(() => ({}))
-  return !!j?.ok
-}
-
-/**
- * Amountinator-based input:
- * User types in THEIR preferred currency, we convert to satoshis for the action.
- */
-function AmountinatorInputField({
-  label,
-  storageKey,
-  onSatoshisChange
-}: {
-  label: string
-  storageKey: string
-  onSatoshisChange: (sats: number | null) => void
-}) {
-  const [amount, setAmount] = useState(() => localStorage.getItem(storageKey) ?? '')
-  const [currencySymbol, setCurrencySymbol] = useState('$')
-  const currencyConverter = useMemo(() => new CurrencyConverter(), [])
-
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        await currencyConverter.initialize()
-        if (cancelled) return
-        setCurrencySymbol(currencyConverter.getCurrencySymbol())
-
-        // hydrate sats on load (so Send works immediately after refresh)
-        if (amount && amount !== '.' && amount !== '..') {
-          const sats = await currencyConverter.convertToSatoshis(amount)
-          if (!cancelled) onSatoshisChange(Number.isFinite(sats) ? Math.floor(sats) : null)
-        }
-      } catch {
-        // keep UI usable even if converter fails
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const handleAmountChange = useCallback(
-    async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const input = event.target.value.replace(/[^0-9.]/g, '')
-      setAmount(input)
-      localStorage.setItem(storageKey, input)
-
-      if (input === '' || input === '.' || input === '..') {
-        onSatoshisChange(null)
-        return
-      }
-
-      try {
-        const satoshis = await currencyConverter.convertToSatoshis(input)
-        onSatoshisChange(Number.isFinite(satoshis) ? Math.floor(satoshis) : null)
-      } catch {
-        onSatoshisChange(null)
-      }
-    },
-    [currencyConverter, onSatoshisChange, storageKey]
-  )
-
-  return (
-    <TextField
-      label={label}
-      variant="outlined"
-      value={amount}
-      onChange={handleAmountChange}
-      fullWidth
-      InputProps={{
-        startAdornment:  <InputAdornment position="start" sx={{ color: 'rgba(233,236,255,0.85)' }}>
-    <span style={{ color: 'inherit', fontWeight: 700 }}>{currencySymbol}</span>
-  </InputAdornment>
-      }}
-      sx={{
-        '& .MuiInputBase-root': {
-          borderRadius: '10px',
-          background: 'rgba(0,0,0,0.28)',
-          color: '#e9ecff'
-        },
-        '& .MuiInputBase-input': {
-          padding: '10px 12px'
-        },
-        '& .MuiOutlinedInput-notchedOutline': {
-          borderColor: 'rgba(255,255,255,0.12)'
-        },
-        '&:hover .MuiOutlinedInput-notchedOutline': {
-          borderColor: 'rgba(255,255,255,0.20)'
-        },
-        '& .MuiFormLabel-root': {
-          color: 'rgba(233,236,255,0.65)'
-        },
-        '& .MuiFormLabel-root.Mui-focused': {
-          color: 'rgba(233,236,255,0.85)'
-        }
-      }}
-    />
-  )
 }
 
 export default function App() {
@@ -337,12 +333,13 @@ export default function App() {
   const [utxos, setUtxos] = useState<Utxo[]>([])
   const [depositSats, setDepositSats] = useState(0)
 
-  // MetaNet -> address (HandCash deposit address)
+  // MetaNet -> HandCash
   const [toAddress, setToAddress] = useState(() => localStorage.getItem(TO_ADDR_LS_KEY) ?? '')
-  const [toSats, setToSats] = useState<number | null>(null) // set by amountinator input
+  const [mnAmount, setMnAmount] = useState(() => localStorage.getItem(MN_AMOUNT_LS_KEY) ?? '')
+  const [toSats, setToSats] = useState<number | null>(null)
 
-  // HandCash -> MetaNet amount (USD)
-  const [hcUsdAmount, setHcUsdAmount] = useState<number>(2)
+  // HandCash -> MetaNet amount (HandCash uses fiat)
+  const [hcUsdAmount, setHcUsdAmount] = useState<number>(0.01)
 
   const [busy, setBusy] = useState<string | null>(null)
   const [flowStatus, setFlowStatus] = useState('')
@@ -358,13 +355,13 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    // local storage persistence for retry
     if (pendingRemit) localStorage.setItem(PENDING_REMIT_LS_KEY, JSON.stringify(pendingRemit))
     else localStorage.removeItem(PENDING_REMIT_LS_KEY)
 
     localStorage.setItem(REMIT_ADDR_LS_KEY, remitAddress)
     localStorage.setItem(TO_ADDR_LS_KEY, toAddress)
-  }, [pendingRemit, remitAddress, toAddress])
+    localStorage.setItem(MN_AMOUNT_LS_KEY, mnAmount)
+  }, [pendingRemit, remitAddress, toAddress, mnAmount])
 
   async function connectMetanet() {
     try {
@@ -403,11 +400,8 @@ export default function App() {
     const { network } = await client.getNetwork({})
     setNetwork(network)
 
-    const r = await fetch(`${API_URL}/api/remittance/prepare`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include'
-    })
+    const r = await fetch(`${API_URL}/api/remittance/prepare`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include' })
+
     const j = await r.json().catch(() => ({}))
     if (!r.ok) throw new Error(j?.error ?? JSON.stringify(j))
 
@@ -419,7 +413,7 @@ export default function App() {
     }
 
     const { publicKey } = await client.getPublicKey({
-      protocolID: remit.protocolID,
+      protocolID: remit.protocolID as any, // ✅ fixes tsc SecurityLevel tuple mismatch
       keyID: remitKeyId(remit),
       counterparty: remit.senderIdentityKey,
       forSelf: true
@@ -448,7 +442,7 @@ export default function App() {
         typeof (beef as any).toBinaryAtomic === 'function' ? (beef as any).toBinaryAtomic(txid) : null
 
       if (!atomicBeef) {
-        throw new Error('This build needs Beef.toBinaryAtomic(txid). Update @bsv/sdk / your BEEF helper.')
+        throw new Error('AtomicBEEF not available. Update @bsv/sdk and your getBeefForTxid helper.')
       }
 
       await client.internalizeAction({
@@ -520,7 +514,6 @@ export default function App() {
       setFlowStatus(`Internalizing ${newUtxos.length} deposit(s)…`)
       await internalizeRemittanceUtxos(remit, newUtxos, network)
 
-      // success
       setPendingRemit(null)
       setRemitAddress('')
 
@@ -582,14 +575,10 @@ export default function App() {
   async function metanetToHandcashAddress() {
     try {
       if (!metanetConnected) throw new Error('Connect MetaNet first.')
-
       const addr = toAddress.trim()
       if (!addr) throw new Error('Enter your HandCash deposit address.')
       if (!looksLikeBase58Address(addr)) throw new Error('That doesn’t look like a valid base58 address.')
-
-      if (!toSats || !Number.isSafeInteger(toSats) || toSats <= 0) {
-        throw new Error('Enter an amount (your preferred currency).')
-      }
+      if (!toSats || !Number.isFinite(toSats) || toSats <= 0) throw new Error('Enter a valid amount.')
 
       setBusy('mn->hc')
       setLog('')
@@ -597,11 +586,13 @@ export default function App() {
       const lockingScript = new P2PKH().lock(addr).toHex()
       const { txid } = await client.createAction({
         description: 'MetaBridge: MetaNet → HandCash',
-        outputs: [{ satoshis: toSats, lockingScript, outputDescription: 'To HandCash deposit address' }],
+        outputs: [{ satoshis: Math.floor(toSats), lockingScript, outputDescription: 'To HandCash deposit address' }],
         options: { randomizeOutputs: false, acceptDelayedBroadcast: false }
       })
 
       setLog(`✅ MetaNet → HandCash sent\nTXID: ${txid}`)
+      setMnAmount('')
+      setToSats(null)
     } catch (e: any) {
       setLog(`❌ ${e?.message ?? String(e)}`)
     } finally {
@@ -610,21 +601,21 @@ export default function App() {
   }
 
   const canOneClick = metanetConnected && handcashConnected && busy == null
-  const canMetaSend = metanetConnected && busy == null
+  const canMetaSend = metanetConnected && busy == null && !!toSats && toSats > 0
+  const canRetry = metanetConnected && !!pendingRemit && !!remitAddress && busy == null
 
   return (
     <div style={styles.page}>
+      {/* Global CSS reset: fixes the “white box” + spacing issues */}
       <style>{`
         html, body, #root { height: 100%; margin: 0; background: #070914; }
         * { box-sizing: border-box; }
-        body { overflow-x: hidden; }
-
-        @media (max-width: 980px) {
-          .row2 { grid-template-columns: 1fr !important; }
-        }
-
-        /* amountinator-react sometimes renders blocky nodes; force inline */
-        .amtInline, .amtInline * { display: inline !important; white-space: nowrap !important; }
+        .row2 { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr); gap: 14px; align-items: start; }
+        @media (max-width: 980px) { .row2 { grid-template-columns: 1fr; } }
+        /* Make AmountDisplay stay on one line even if it inserts line breaks */
+        .amountInline { display: inline-flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+        .amountInline br { display: none; }
+        .amountInline * { display: inline !important; white-space: nowrap; }
       `}</style>
 
       <div style={styles.shell}>
@@ -665,12 +656,9 @@ export default function App() {
             )}
           </div>
         </div>
-            {hcUsdAmount > 10 && (
-                <div style={styles.notice}>
-                  Disclaimer: Transfering large amounts is not recommended! By reading this message you acknowledge that you are aware of the risks involved in transferring <b>${hcUsdAmount} </b>.
-                </div>
-              )}
-        <div className="row2" style={styles.row2}>
+
+        <div className="row2">
+          {/* HandCash -> MetaNet */}
           <div style={styles.card}>
             <h3 style={styles.cardTitle}>HandCash → MetaNet</h3>
 
@@ -696,8 +684,9 @@ export default function App() {
                 onChange={e => setHcUsdAmount(Number(e.target.value))}
                 disabled={!!busy}
               />
-
-             
+              <div style={styles.hint}>
+                Heads up: HandCash may show an extra confirmation/disclaimer for transfers over <b>$10</b>.
+              </div>
             </div>
 
             <div style={styles.miniRow}>
@@ -710,9 +699,9 @@ export default function App() {
               </button>
 
               <button
-                style={{ ...styles.button, ...(pendingRemit && remitAddress && !busy ? {} : styles.buttonDisabled) }}
+                style={{ ...styles.button, ...(canRetry ? {} : styles.buttonDisabled) }}
                 onClick={retryInternalizePending}
-                disabled={!pendingRemit || !remitAddress || !!busy}
+                disabled={!canRetry}
                 title="If your app crashed after paying, you can safely retry internalizing."
               >
                 Retry internalize
@@ -765,20 +754,15 @@ export default function App() {
               />
             </div>
 
-            <div style={styles.field}>
-              <AmountinatorInputField
-                label="Amount (your MetaNet preferred currency)"
-                storageKey={MN_AMOUNT_LS_KEY}
-                onSatoshisChange={setToSats}
-              />
+            <AmountinatorInput
+              label="Amount (your MetaNet preferred currency)"
+              value={mnAmount}
+              onValueChange={setMnAmount}
+              onSatoshisChange={setToSats}
+              disabled={!!busy}
+            />
 
-              <div style={styles.hint}>
-                Est:&nbsp;
-                <span className="amtInline">
-                  <AmountDisplay paymentAmount={toSats ?? 0} formatOptions={{ decimalPlaces: 2 }} />
-                </span>
-              </div>
-            </div>
+
 
             <div style={styles.miniRow}>
               <button
@@ -787,6 +771,11 @@ export default function App() {
                 disabled={!canMetaSend}
               >
                 {busy === 'mn->hc' ? 'Sending…' : 'Send'}
+                {toSats ? (
+                  <span className="amountInline" style={{ opacity: 0.95 }}>
+                    <AmountDisplay paymentAmount={toSats} formatOptions={{ decimalPlaces: 2 }} />
+                  </span>
+                ) : null}
               </button>
             </div>
 
