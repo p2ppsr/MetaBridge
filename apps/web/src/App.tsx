@@ -407,7 +407,11 @@ export default function App() {
       const lockingScript = new P2PKH().lock(addr).toHex()
       const { txid } = await client.createAction({
         description: 'MetaBridge: MetaNet → HandCash',
-        outputs: [{ satoshis: toSats, lockingScript, outputDescription: 'To HandCash deposit address' }]
+        outputs: [{ satoshis: toSats, lockingScript, outputDescription: 'To HandCash deposit address' }],
+          options: {
+          randomizeOutputs: false,
+          acceptDelayedBroadcast: false
+        },
       })
 
       setLog(`✅ MetaNet → HandCash sent\nSats: ${formatSats(toSats)}\nTXID: ${txid}`)
