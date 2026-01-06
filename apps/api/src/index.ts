@@ -4,6 +4,7 @@ import cors from 'cors'
 import crypto from 'crypto'
 import cookieParser from 'cookie-parser'
 import { HandCashConnect } from '@handcash/handcash-connect'
+import { PrivateKey } from '@bsv/sdk'
 
 const app = express()
 app.use(express.json())
@@ -24,7 +25,7 @@ app.set('trust proxy', 1)
 app.use(
   cors({
     origin: FRONTEND_URL,
-    credentials: true,
+    credentials: true
   })
 )
 
@@ -37,22 +38,57 @@ if (!HANDCASH_APP_ID || !HANDCASH_APP_SECRET) {
 
 const hc = new HandCashConnect({
   appId: HANDCASH_APP_ID,
-  appSecret: HANDCASH_APP_SECRET,
+  appSecret: HANDCASH_APP_SECRET
 })
+function publicKeyToCompressedHex(pub: any): string {
+  // Some versions serialize via toString(), others toHex(), others might already be a string.
+  const s =
+    typeof pub === 'string'
+      ? pub
+      : pub && typeof pub.toString === 'function'
+        ? pub.toString()
+        : pub && typeof pub.toHex === 'function'
+          ? pub.toHex()
+          : pub && typeof pub.toHexString === 'function'
+            ? pub.toHexString()
+            : ''
+
+  const hex = String(s).trim()
+
+  // Must be 33-byte compressed pubkey: 02/03 + 64 hex chars
+  if (!/^(02|03)[0-9a-f]{64}$/i.test(hex)) {
+    throw new Error(`senderIdentityKey is not a compressed pubkey hex string. Got: ${hex || '(empty)'}`)
+  }
+  return hex
+}
+/**
+ * MetaBridge identity (senderIdentityKey for BRC-29 remittance)
+ *
+ * IMPORTANT:
+ * - Set METABRIDGE_IDENTITY_WIF in prod so this identity is stable across restarts.
+ * - If you don't, we generate one at startup (fine for dev), but any pending deposits
+ *   made with the old key won't be internalizable after a restart.
+ */
+const METABRIDGE_IDENTITY_WIF = process.env.METABRIDGE_IDENTITY_WIF
+const bridgeIdentityPriv = METABRIDGE_IDENTITY_WIF ? PrivateKey.fromWif(METABRIDGE_IDENTITY_WIF) : PrivateKey.fromRandom()
+const senderIdentityKey = publicKeyToCompressedHex(bridgeIdentityPriv.toPublicKey())
+if (!METABRIDGE_IDENTITY_WIF) {
+  console.warn('[metabridge] METABRIDGE_IDENTITY_WIF not set. Using a random identity key (dev only).')
+}
 
 /**
  * DEV session store (in-memory):
  * sessionToken -> authToken
  * For prod: use Redis/DB + expiration.
  */
-const sessionToAuthToken = new Map()
+const sessionToAuthToken = new Map<string, string>()
 
 /**
  * OAuth CSRF protection:
  * state -> createdAtMs
  * For prod: Redis with TTL.
  */
-const oauthStateToCreatedAt = new Map()
+const oauthStateToCreatedAt = new Map<string, number>()
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 
 function now() {
@@ -66,21 +102,21 @@ function cleanupOldStates() {
   }
 }
 
-function createSession(authToken) {
+function createSession(authToken: string) {
   const sessionToken = crypto.randomBytes(32).toString('base64url')
   sessionToAuthToken.set(sessionToken, authToken)
   return sessionToken
 }
 
-function lookupAuthTokenFromSession(sessionToken) {
+function lookupAuthTokenFromSession(sessionToken: string) {
   return sessionToAuthToken.get(sessionToken)
 }
 
-function clearSession(sessionToken) {
+function clearSession(sessionToken: string) {
   sessionToAuthToken.delete(sessionToken)
 }
 
-function cookieOptions(req) {
+function cookieOptions(req: express.Request) {
   const isProd = process.env.NODE_ENV === 'production'
   // If you're using HTTPS at ingress, req.secure will be true when trust proxy is set.
   const secure = isProd ? true : req.secure
@@ -88,10 +124,10 @@ function cookieOptions(req) {
   return {
     httpOnly: true,
     secure,
-    sameSite: 'lax',
+    sameSite: 'lax' as const,
     path: '/',
     // 7 days; adjust to taste
-    maxAge: 7 * 24 * 60 * 60 * 1000,
+    maxAge: 7 * 24 * 60 * 60 * 1000
   }
 }
 
@@ -109,10 +145,9 @@ app.get('/auth/handcash/start', (req, res) => {
   oauthStateToCreatedAt.set(state, now())
 
   // IMPORTANT: include required permissions
-  // If you previously needed PAY, keep it here.
   const url = hc.getRedirectionUrl({
     permissions: ['PAY'],
-    state,
+    state
   })
 
   res.redirect(url)
@@ -158,12 +193,41 @@ app.post('/auth/logout', (req, res) => {
   res.clearCookie('mb_session', { path: '/' })
   res.json({ ok: true })
 })
+
 app.get('/api/session', (req, res) => {
   const sessionToken = String(req.cookies?.mb_session || '').trim()
   if (!sessionToken) return res.json({ ok: false })
   const authToken = lookupAuthTokenFromSession(sessionToken)
   return res.json({ ok: !!authToken })
 })
+
+/**
+ * Remittance prepare endpoint:
+ * - returns BRC-29 protocolID, senderIdentityKey, derivationPrefix/suffix
+ * - frontend uses these to derive a one-time deposit address in MetaNet
+ */
+app.post('/api/remittance/prepare', (req, res) => {
+  const sessionToken = String(req.cookies?.mb_session || '').trim()
+  if (!sessionToken) return res.status(401).json({ error: 'Not logged in (missing session cookie)' })
+
+  const authToken = lookupAuthTokenFromSession(sessionToken)
+  if (!authToken) return res.status(401).json({ error: 'Invalid/expired session' })
+
+  const protocolID: [number, string] = [2, '3241645161d8']
+
+  // Use base64 for remittance key material (stable across implementations)
+  const derivationPrefix = crypto.randomBytes(16).toString('base64')
+  const derivationSuffix = crypto.randomBytes(16).toString('base64')
+
+  return res.json({
+    ok: true,
+    protocolID,
+    senderIdentityKey,     // <-- string now
+    derivationPrefix,      // <-- base64
+    derivationSuffix       // <-- base64
+  })
+})
+
 /**
  * Pay endpoint:
  * - reads session from cookie
@@ -190,17 +254,17 @@ app.post('/api/handcash/pay', async (req, res) => {
 
     const paymentResult = await account.wallet.pay({
       description: note, // <= 25 chars
-      payments: [{ destination, currencyCode, sendAmount }],
+      payments: [{ destination, currencyCode, sendAmount }]
     })
 
     return res.json({ ok: true, paymentResult })
-  } catch (e) {
+  } catch (e: any) {
     console.error('HandCash pay error:', e)
     return res.status(500).json({
       error: e?.message ?? String(e),
       name: e?.name,
       code: e?.code,
-      details: e?.response?.data ?? e?.details ?? null,
+      details: e?.response?.data ?? e?.details ?? null
     })
   }
 })
@@ -208,4 +272,5 @@ app.post('/api/handcash/pay', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`metabridge backend listening on http://localhost:${PORT}`)
   console.log(`FRONTEND_URL=${FRONTEND_URL}`)
+  console.log(`senderIdentityKey=${senderIdentityKey}`)
 })
