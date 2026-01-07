@@ -10,7 +10,7 @@ import getBeefForTxid from './getBeefForTxid'
 
 // For prod (frontend+backend same domain), set VITE_API_URL="" or leave undefined.
 // For local dev, set VITE_API_URL="http://localhost:8080"
-const API_URL = 'http://localhost:8080'
+const API_URL = ''
 const client = new WalletClient('auto')
 
 type Network = 'mainnet' | 'testnet'
