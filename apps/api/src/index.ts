@@ -62,8 +62,6 @@ function publicKeyToCompressedHex(pub: any): string {
   return hex
 }
 /**
- * MetaBridge identity (senderIdentityKey for BRC-29 remittance)
- *
  * IMPORTANT:
  * - Set METABRIDGE_IDENTITY_WIF in prod so this identity is stable across restarts.
  * - If you don't, we generate one at startup (fine for dev), but any pending deposits
@@ -203,7 +201,6 @@ app.get('/api/session', (req, res) => {
 
 /**
  * Remittance prepare endpoint:
- * - returns BRC-29 protocolID, senderIdentityKey, derivationPrefix/suffix
  * - frontend uses these to derive a one-time deposit address in MetaNet
  */
 app.post('/api/remittance/prepare', (req, res) => {
@@ -222,9 +219,9 @@ app.post('/api/remittance/prepare', (req, res) => {
   return res.json({
     ok: true,
     protocolID,
-    senderIdentityKey,     // <-- string now
-    derivationPrefix,      // <-- base64
-    derivationSuffix       // <-- base64
+    senderIdentityKey,
+    derivationPrefix,
+    derivationSuffix
   })
 })
 
