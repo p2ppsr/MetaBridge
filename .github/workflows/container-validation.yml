@@ -1,0 +1,22 @@
+name: Container validation
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, web]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build the Linux application image
+        run: docker build --platform linux/amd64 --tag metabridge-${{ matrix.app }}:check apps/${{ matrix.app }}
+      - name: Verify the API native runtime
+        if: matrix.app == 'api'
+        run: test "$(docker run --rm --entrypoint node metabridge-api:check --version)" = v22.23.4
