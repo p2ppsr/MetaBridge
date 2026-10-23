@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "ts-node --transpile-only src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/src/index.js"
+    "start": "node dist/src/index.js",
+    "test": "node --test dist/src/lifecycle.test.js"
   },
   "dependencies": {
     "@bsv/sdk": "^1.9.31",

@@ -3,6 +3,7 @@ import express from 'express'
 import cors from 'cors'
 import crypto from 'crypto'
 import cookieParser from 'cookie-parser'
+import { drainHttpServer } from './lifecycle.js'
 import { HandCashConnect } from '@handcash/handcash-connect'
 import { PrivateKey } from '@bsv/sdk'
 
@@ -266,8 +267,22 @@ app.post('/api/handcash/pay', async (req, res) => {
   }
 })
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`metabridge backend listening on http://localhost:${PORT}`)
   console.log(`FRONTEND_URL=${FRONTEND_URL}`)
   console.log(`senderIdentityKey=${senderIdentityKey}`)
 })
+
+let stopping = false
+async function shutdown(): Promise<void> {
+  if (stopping) return
+  stopping = true
+  try {
+    const forced = await drainHttpServer(server)
+    process.exit(forced ? 1 : 0)
+  } catch {
+    process.exit(1)
+  }
+}
+process.once('SIGTERM', () => { void shutdown() })
+process.once('SIGINT', () => { void shutdown() })
